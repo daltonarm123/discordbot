@@ -15,9 +15,8 @@ from bot.database import Database
 
 
 def load_environment() -> None:
-    for env_file in (".env", ".env.example"):
-        if os.path.exists(env_file):
-            load_dotenv(dotenv_path=env_file, override=False)
+    if os.path.exists(".env"):
+        load_dotenv(dotenv_path=".env", override=False)
 
 
 load_environment()
@@ -401,13 +400,27 @@ async def start_health_server() -> None:
 
 
 async def main() -> None:
-    if not TOKEN:
-        raise RuntimeError("DISCORD_TOKEN is missing. Copy .env.example to .env and add the bot token.")
+    if not TOKEN or TOKEN.lower() in {"your_discord_bot_token_here", "your-token-here"}:
+        LOGGER.error("DISCORD_TOKEN is missing or still set to the placeholder value. Set a real bot token in Railway variables or a local .env file.")
+        health_runner = None
+        try:
+            async with bot:
+                health_runner = await start_health_server()
+                LOGGER.info("Bot is running in placeholder mode; waiting for a valid token.")
+                await asyncio.Event().wait()
+        finally:
+            if health_runner is not None:
+                await health_runner.cleanup()
+        return
+
     health_runner = None
     try:
         async with bot:
             health_runner = await start_health_server()
             await bot.start(TOKEN)
+    except discord.LoginFailure as exc:
+        LOGGER.error("Discord login failed. Check DISCORD_TOKEN in Railway variables: %s", exc)
+        await asyncio.Event().wait()
     finally:
         if health_runner is not None:
             await health_runner.cleanup()
