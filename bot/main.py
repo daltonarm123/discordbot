@@ -19,8 +19,23 @@ LOGGER = logging.getLogger("community-bot")
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/community.db")
-TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", "0") or 0)
 PLATFORMS = ("Java", "Bedrock", "Xbox", "PlayStation", "Mobile")
+
+
+def normalize_test_guild_id(raw_value: str | None) -> int:
+    if not raw_value:
+        return 0
+    value = raw_value.strip()
+    if not value:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid TEST_GUILD_ID %r; disabling guild-specific sync", raw_value)
+        return 0
+
+
+TEST_GUILD_ID = normalize_test_guild_id(os.getenv("TEST_GUILD_ID"))
 
 
 class CommunityBot(commands.Bot):
@@ -48,6 +63,15 @@ class CommunityBot(commands.Bot):
                 LOGGER.info("Synced global commands")
             except (discord.Forbidden, discord.HTTPException) as exc:
                 LOGGER.warning("Could not sync global commands: %s", exc)
+
+
+async def sync_guild_commands(guild: discord.Guild | discord.Object) -> None:
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        LOGGER.info("Synced commands to guild %s", guild.id)
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        LOGGER.warning("Could not sync commands to guild %s: %s", guild.id, exc)
 
     async def cache_invites(self, guild: discord.Guild) -> None:
         try:
@@ -91,6 +115,13 @@ async def on_ready() -> None:
 @bot.event
 async def on_guild_join(guild: discord.Guild) -> None:
     await bot.cache_invites(guild)
+    await sync_guild_commands(guild)
+    try:
+        await guild.system_channel.send(
+            "Hello! I’m ready to help with verification, roles, suggestions, and community setup. Run `/setup` to configure the channels and role."
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 @bot.event
@@ -140,33 +171,44 @@ async def setup(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
 
-    verified = discord.utils.get(guild.roles, name="Verified") or await guild.create_role(
-        name="Verified", reason="Community bot setup"
-    )
-    category = discord.utils.get(guild.categories, name="COMMUNITY BOT") or await guild.create_category("COMMUNITY BOT")
+    try:
+        verified = discord.utils.get(guild.roles, name="Verified") or await guild.create_role(
+            name="Verified", reason="Community bot setup"
+        )
+        category = discord.utils.get(guild.categories, name="COMMUNITY BOT") or await guild.create_category("COMMUNITY BOT")
 
-    async def channel(name: str) -> discord.TextChannel:
-        existing = discord.utils.get(guild.text_channels, name=name)
-        return existing or await guild.create_text_channel(name, category=category)
+        async def channel(name: str, fallback_name: str | None = None) -> discord.TextChannel:
+            existing = discord.utils.get(guild.text_channels, name=name)
+            if existing:
+                return existing
+            if fallback_name:
+                existing = discord.utils.get(guild.text_channels, name=fallback_name)
+                if existing:
+                    return existing
+            return await guild.create_text_channel(name, category=category)
 
-    welcome = await channel("welcome")
-    suggestions = await channel("suggestions")
-    applications = await channel("staff-applications")
-    logs = await channel("bot-logs")
-    await logs.set_permissions(guild.default_role, view_channel=False)
+        welcome = await channel("welcome", "general")
+        suggestions = await channel("suggestions", "suggestions")
+        applications = await channel("staff-applications", "applications")
+        logs = await channel("bot-logs", "bot-logs")
+        await logs.set_permissions(guild.default_role, view_channel=False)
 
-    await bot.db.set_config(
-        guild.id,
-        welcome_channel_id=welcome.id,
-        log_channel_id=logs.id,
-        suggestion_channel_id=suggestions.id,
-        application_channel_id=applications.id,
-        verified_role_id=verified.id,
-    )
-    await interaction.followup.send(
-        "Setup complete. I created/configured the Verified role and the welcome, suggestions, applications, and bot-logs channels.",
-        ephemeral=True,
-    )
+        await bot.db.set_config(
+            guild.id,
+            welcome_channel_id=welcome.id,
+            log_channel_id=logs.id,
+            suggestion_channel_id=suggestions.id,
+            application_channel_id=applications.id,
+            verified_role_id=verified.id,
+        )
+        await send_log(guild, "Setup complete", "The community bot setup has finished and the welcome/log channels are ready.")
+        await interaction.followup.send(
+            "Setup complete. I created/configured the Verified role and the welcome, suggestions, applications, and bot-logs channels.",
+            ephemeral=True,
+        )
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        LOGGER.exception("Setup failed for guild %s", guild.id)
+        await interaction.followup.send(f"Setup failed: {exc}", ephemeral=True)
 
 
 @setup.error
