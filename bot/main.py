@@ -13,7 +13,14 @@ from dotenv import load_dotenv
 
 from bot.database import Database
 
-load_dotenv()
+
+def load_environment() -> None:
+    for env_file in (".env", ".env.example"):
+        if os.path.exists(env_file):
+            load_dotenv(dotenv_path=env_file, override=False)
+
+
+load_environment()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger("community-bot")
 
@@ -38,6 +45,25 @@ def normalize_test_guild_id(raw_value: str | None) -> int:
 TEST_GUILD_ID = normalize_test_guild_id(os.getenv("TEST_GUILD_ID"))
 
 
+def get_command_sync_targets(raw_value: str | None) -> list[int | None]:
+    targets: list[int | None] = [None]
+    if not raw_value:
+        return targets
+
+    value = raw_value.strip()
+    if not value:
+        return targets
+
+    try:
+        guild_id = int(value)
+    except ValueError:
+        LOGGER.warning("Invalid TEST_GUILD_ID %r; disabling guild-specific sync", raw_value)
+        return targets
+
+    targets.append(guild_id)
+    return targets
+
+
 class CommunityBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -49,20 +75,22 @@ class CommunityBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.initialize()
-        if TEST_GUILD_ID:
-            guild = discord.Object(id=TEST_GUILD_ID)
+        for target in get_command_sync_targets(os.getenv("TEST_GUILD_ID")):
+            if target is None:
+                try:
+                    await self.tree.sync()
+                    LOGGER.info("Synced global commands")
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    LOGGER.warning("Could not sync global commands: %s", exc)
+                continue
+
+            guild = discord.Object(id=target)
             self.tree.copy_global_to(guild=guild)
             try:
                 await self.tree.sync(guild=guild)
-                LOGGER.info("Synced commands to test guild %s", TEST_GUILD_ID)
+                LOGGER.info("Synced commands to test guild %s", target)
             except (discord.Forbidden, discord.HTTPException) as exc:
-                LOGGER.warning("Could not sync commands to test guild %s: %s", TEST_GUILD_ID, exc)
-        else:
-            try:
-                await self.tree.sync()
-                LOGGER.info("Synced global commands")
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                LOGGER.warning("Could not sync global commands: %s", exc)
+                LOGGER.warning("Could not sync commands to guild %s: %s", target, exc)
 
 
 async def sync_guild_commands(guild: discord.Guild | discord.Object) -> None:
@@ -100,6 +128,7 @@ async def on_ready() -> None:
         await bot.cache_invites(guild)
         await sync_guild_commands(guild)
     LOGGER.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
+    LOGGER.info("Slash commands are synced for %s guild(s)", len(bot.guilds))
 
 
 @bot.event
