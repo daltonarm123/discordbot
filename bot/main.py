@@ -6,6 +6,7 @@ import os
 from typing import Literal
 
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -17,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 LOGGER = logging.getLogger("community-bot")
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-DATABASE_PATH = os.getenv("DATABASE_PATH", "data/community.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/community.db")
 TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", "0") or 0)
 PLATFORMS = ("Java", "Bedrock", "Xbox", "PlayStation", "Mobile")
 
@@ -36,11 +37,17 @@ class CommunityBot(commands.Bot):
         if TEST_GUILD_ID:
             guild = discord.Object(id=TEST_GUILD_ID)
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            LOGGER.info("Synced commands to test guild %s", TEST_GUILD_ID)
+            try:
+                await self.tree.sync(guild=guild)
+                LOGGER.info("Synced commands to test guild %s", TEST_GUILD_ID)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                LOGGER.warning("Could not sync commands to test guild %s: %s", TEST_GUILD_ID, exc)
         else:
-            await self.tree.sync()
-            LOGGER.info("Synced global commands")
+            try:
+                await self.tree.sync()
+                LOGGER.info("Synced global commands")
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                LOGGER.warning("Could not sync global commands: %s", exc)
 
     async def cache_invites(self, guild: discord.Guild) -> None:
         try:
@@ -313,11 +320,29 @@ async def global_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(message, ephemeral=True)
 
 
+async def start_health_server() -> None:
+    port = int(os.getenv("PORT", "8080"))
+    app = web.Application()
+    app.router.add_get("/health", lambda request: web.Response(text="ok"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    LOGGER.info("Health server listening on port %s", port)
+    return runner
+
+
 async def main() -> None:
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is missing. Copy .env.example to .env and add the bot token.")
-    async with bot:
-        await bot.start(TOKEN)
+    health_runner = None
+    try:
+        async with bot:
+            health_runner = await start_health_server()
+            await bot.start(TOKEN)
+    finally:
+        if health_runner is not None:
+            await health_runner.cleanup()
 
 
 if __name__ == "__main__":
