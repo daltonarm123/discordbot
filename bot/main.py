@@ -73,17 +73,6 @@ async def sync_guild_commands(guild: discord.Guild | discord.Object) -> None:
     except (discord.Forbidden, discord.HTTPException) as exc:
         LOGGER.warning("Could not sync commands to guild %s: %s", guild.id, exc)
 
-    async def cache_invites(self, guild: discord.Guild) -> None:
-        try:
-            invites = await guild.invites()
-        except discord.Forbidden:
-            LOGGER.warning("Missing Manage Guild permission for invite tracking in %s", guild.id)
-            return
-        self.invite_cache[guild.id] = {
-            invite.code: (invite.uses or 0, invite.inviter.id if invite.inviter else None)
-            for invite in invites
-        }
-
 
 bot = CommunityBot()
 
@@ -109,7 +98,15 @@ async def send_log(guild: discord.Guild, title: str, description: str) -> None:
 async def on_ready() -> None:
     for guild in bot.guilds:
         await bot.cache_invites(guild)
+        await sync_guild_commands(guild)
     LOGGER.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
+
+
+@bot.event
+async def on_connect() -> None:
+    await asyncio.sleep(2)
+    for guild in bot.guilds:
+        await sync_guild_commands(guild)
 
 
 @bot.event
